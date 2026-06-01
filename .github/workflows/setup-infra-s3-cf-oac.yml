@@ -1,0 +1,105 @@
+name: Secure Infrastructure Setup (S3 + CloudFront OAC)
+
+on:
+  workflow_dispatch: # Allows manual execution from the GitHub Actions UI
+
+jobs:
+  infrastructure:
+    runs-on: ubuntu-latest
+    env:
+      BUCKET_NAME: ${{ secrets.AWS_CF_S3_BUCKET_NAME }}
+      AWS_REGION: us-east-1 # Change to your preferred region
+
+    steps:
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    # 1. Provision a strictly private S3 bucket
+    - name: Setup Private S3 Bucket
+      run: |
+        if ! aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+          echo "Creating bucket $BUCKET_NAME..."
+          aws s3api create-bucket --bucket "$BUCKET_NAME" --region "$AWS_REGION"
+        fi
+
+        echo "Enforcing strict Block Public Access..."
+        aws s3api put-public-access-block \
+          --bucket "$BUCKET_NAME" \
+          --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+
+    # 2. Deploy CloudFront Origin Access Control (OAC)
+    - name: Setup CloudFront OAC
+      id: oac
+      run: |
+        OAC_NAME="OAC-$BUCKET_NAME"
+        
+        # Check if OAC already exists
+        OAC_ID=$(aws cloudfront list-origin-access-controls --query "OriginAccessControlList.Items[?Name=='$OAC_NAME'].Id" --output text)
+        
+        if [ "$OAC_ID" == "None" ] || [ -z "$OAC_ID" ]; then
+          echo "Creating Origin Access Control (OAC)..."
+          OAC_CONFIG='{"Name":"'"$OAC_NAME"'","Description":"Secure S3 OAC","SigningProtocol":"sigv4","SigningBehavior":"always","OriginAccessControlFileType":"s3"}'
+          OAC_ID=$(aws cloudfront create-origin-access-control --origin-access-control-config "$OAC_CONFIG" --query "OriginAccessControl.Id" --output text)
+        fi
+        
+        echo "OAC_ID=$OAC_ID" >> $GITHUB_OUTPUT
+
+    # 3. Create CloudFront Distribution pointing to the REST API endpoint
+    - name: Deploy CloudFront CDN
+      id: cdn
+      run: |
+        # Secure, direct S3 REST API endpoint (Not the public website endpoint)
+        S3_REST_DOMAIN="$BUCKET_NAME.s3.$AWS_://amazonaws.com"
+        OAC_ID="${{ steps.oac.outputs.OAC_ID }}"
+        
+        # Check if distribution exists
+        DIST_ID=$(aws cloudfront list-distributions --query "DistributionList.Items[?Origins.Items[?DomainName=='$S3_REST_DOMAIN']].Id" --output text)
+        
+        if [ "$DIST_ID" == "None" ] || [ -z "$DIST_ID" ]; then
+          echo "Creating CloudFront Distribution..."
+          CALLER_REF=$(date +%s)
+          
+          CONFIG_JSON=$(cat  $GITHUB_OUTPUT
+        echo "CF_DOMAIN=$CF_DOMAIN" >> $GITHUB_OUTPUT
+
+    # 4. Restrict S3 Bucket Policy to allow ONLY your specific CloudFront Distribution
+    - name: Lock Down S3 Bucket Policy to CloudFront
+      run: |
+        DIST_ID="${{ steps.cdn.outputs.DIST_ID }}"
+        AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
+        
+        POLICY_JSON=$(cat <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowCloudFrontServicePrincipalReadOnly",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "://amazonaws.com"
+            },
+            "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::$BUCKET_NAME/*",
+            "Condition": {
+                "StringEquals": {
+                    "AWS:SourceArn": "arn:aws:strip-tags:us-east-1:$AWS_ACCOUNT_ID:distribution/$DIST_ID"
+                }
+            }
+        }
+    ]
+}
+EOF
+        )
+        
+        # Override the block temporarily to safely inject the secure policy
+        aws s3api put-bucket-policy --bucket "$BUCKET_NAME" --policy "$POLICY_JSON"
+        
+        echo "=========================================================="
+        echo "INFRASTRUCTURE SECURED SUCCESSFULLY!"
+        echo "S3 Public Access: BLOCKED"
+        echo "Secure Production Live URL: https://${{ steps.cdn.outputs.CF_DOMAIN }}"
+        echo "=========================================================="
