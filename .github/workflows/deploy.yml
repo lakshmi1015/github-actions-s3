@@ -1,28 +1,78 @@
-name: Deploy Static Website to S3
+name: Setup and Deploy S3 Static Website
 
 on:
   push:
     branches:
-      - main # Triggers the deployment on every push to the main branch
+      - main
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      BUCKET_NAME: ${{ secrets.AWS_S3_BUCKET_NAME }}
+      AWS_REGION: us-east-1 # Change this to your preferred AWS region
 
     steps:
-    # Step 1: Download the repository files to the runner
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    # Step 2: Configure AWS credentials using the secrets
     - name: Configure AWS Credentials
       uses: aws-actions/configure-aws-credentials@v4
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: us-east-1 # Change this to your bucket's actual AWS region
+        aws-region: ${{ env.AWS_REGION }}
 
-    # Step 3: Sync files to S3 bucket
-    - name: Deploy to S3
+    # Step 1: Create bucket if it doesn't exist, remove public blocks, and enable hosting
+    - name: Provision S3 Bucket and Website Hosting
       run: |
-        aws s3 sync . s3://${{ secrets.AWS_S3_BUCKET_NAME }} --delete --exclude ".git*" --exclude ".github*"
+        # Check if the bucket exists. If not, create it.
+        if ! aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+          echo "Bucket does not exist. Creating bucket $BUCKET_NAME..."
+          
+          # For us-east-1, LocationConstraint is not needed. For other regions, add: --create-bucket-configuration LocationConstraint=$AWS_REGION
+          aws s3api create-bucket --bucket "$BUCKET_NAME" --region "$AWS_REGION"
+          
+          # Disable "Block Public Access" so the website can be viewed by the world
+          aws s3api put-public-access-block \
+            --bucket "$BUCKET_NAME" \
+            --public-access-block-configuration "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false"
+          
+          # Enable static website hosting on the bucket
+          aws s3api put-bucket-website \
+            --bucket "$BUCKET_NAME" \
+            --website-configuration '{"IndexDocument":{"Suffix":"index.html"}}'
+            
+          # Apply the public read bucket policy dynamically
+          POLICY_JSON=$(cat <<EOF
+          {
+              "Version": "2012-10-17",
+              "Statement": [
+                  {
+                      "Sid": "PublicReadGetObject",
+                      "Effect": "Allow",
+                      "Principal": "*",
+                      "Action": "s3:GetObject",
+                      "Resource": "arn:aws:s3:::$BUCKET_NAME/*"
+                  }
+              ]
+          }
+          EOF
+          )
+          aws s3api put-bucket-policy --bucket "$BUCKET_NAME" --policy "$POLICY_JSON"
+        else
+          echo "Bucket $BUCKET_NAME already exists. Skipping creation."
+        fi
+
+    # Step 2: Upload your files to S3
+    - name: Deploy Files to S3
+      run: |
+        aws s3 sync . s3://$BUCKET_NAME --delete --exclude ".git*" --exclude ".github*"
+
+    # Step 3: Output the live URL so you can click it right from GitHub Actions log
+    - name: Display Website URL
+      run: |
+        echo "=========================================================="
+        echo "Your website is live at:"
+        echo "http://$BUCKET_NAME.s3-website-$AWS_://amazonaws.com"
+        echo "=========================================================="
