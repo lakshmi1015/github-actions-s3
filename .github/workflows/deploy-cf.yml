@@ -1,12 +1,12 @@
 name: Deploy Code and Purge CDN Cache
 
-on:
-  workflow_dispatch: # Allows manual execution from the GitHub Actions UI
-  
 # on:
-#   push:
-#     branches:
-#       - main # Automatically deploys every time you push code to the main branch
+#   workflow_dispatch: # Allows manual execution from the GitHub Actions UI
+  
+on:
+  push:
+    branches:
+      - main # Automatically deploys every time you push code to the main branch
 
 
 jobs:
