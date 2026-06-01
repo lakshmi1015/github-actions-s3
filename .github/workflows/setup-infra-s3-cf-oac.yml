@@ -1,13 +1,13 @@
 name: Secure Infrastructure Setup (S3 + CloudFront OAC)
 
-on:
-  workflow_dispatch:
-  push:
-   branches:
-     - main
-      
 # on:
-#   workflow_dispatch: # Allows manual execution from the GitHub Actions UI
+#   workflow_dispatch:
+#   push:
+#    branches:
+#      - main
+      
+on:
+  workflow_dispatch: # Allows manual execution from the GitHub Actions UI
 
 jobs:
   infrastructure:
