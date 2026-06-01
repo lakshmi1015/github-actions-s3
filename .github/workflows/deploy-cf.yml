@@ -1,0 +1,48 @@
+name: Deploy Code and Purge CDN Cache
+
+on:
+  push:
+    branches:
+      - main # Automatically deploys every time you push code to the main branch
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      BUCKET_NAME: ${{ secrets.AWS_CF_S3_BUCKET_NAME }} # Using your exact secret name
+      AWS_REGION: us-east-1
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    # Step 1: Sync updated files directly to the private S3 bucket
+    - name: Deploy Files to S3
+      run: |
+        echo "Syncing code to private S3 bucket: $BUCKET_NAME..."
+        aws s3 sync . s3://$BUCKET_NAME --delete --exclude ".git*" --exclude ".github*"
+
+    # Step 2: Automatically locate your CloudFront CDN ID and invalidate the cache
+    - name: Invalidate CloudFront Cache
+      run: |
+        S3_REST_DOMAIN="$BUCKET_NAME.s3.$AWS_://amazonaws.com"
+        
+        echo "Searching for CloudFront distribution connected to $S3_REST_DOMAIN..."
+        DIST_ID=$(aws cloudfront list-distributions --query "DistributionList.Items[?Origins.Items[?DomainName=='$S3_REST_DOMAIN']].Id" --output text)
+        
+        # Check if a valid Distribution ID was found
+        if [ "$DIST_ID" != "None" ] && [ ! -z "$DIST_ID" ]; then
+          echo "Found Distribution ID: $DIST_ID"
+          echo "Purging CDN Cache so changes reflect immediately..."
+          aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/*"
+        else
+          echo "WARNING: No active CloudFront distribution found matching this S3 origin."
+          echo "Make sure you have successfully run your setup-infra-s3-cf-oac.yml workflow first!"
+        fi
